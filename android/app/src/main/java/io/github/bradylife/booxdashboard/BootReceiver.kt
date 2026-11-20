@@ -4,7 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 
-/** 開機或更新後，把 06:05 與 18:05 兩個鬧鐘都再排一次。 */
+/** 開機或更新後，接上下一個 30 分鐘重新載入。 */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         try {
