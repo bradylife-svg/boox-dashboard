@@ -1,0 +1,5 @@
+# 產生 PNG 需要系統已安裝 Google Chrome 或 Chromium，以及繁體中文字型
+# （Noto Sans CJK TC，Debian／Ubuntu 套件 fonts-noto-cjk）。
+icalendar>=6.1,<8
+recurring-ical-events>=3.4,<4
+Pillow>=10

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">晨間看板</string>
+    <string name="mode_html">已改為網頁</string>
+    <string name="mode_png">已改為圖片</string>
+    <string name="load_failed">無法載入看板。請確認網路後點一下畫面重試。</string>
+</resources>

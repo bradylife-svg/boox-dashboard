@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.Python
+
+# 產生的看板含私人行程，不要提交
+site/
+dashboard.html
+preview.png
+data/events.json
+data/*.json
+
+# Android
+android/.gradle/
+android/.idea/
+android/local.properties
+android/build/
+android/app/build/
+android/captures/
+*.iml
+*.apk
+
+.DS_Store

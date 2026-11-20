@@ -1,0 +1,77 @@
+name: 建置 Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+  pull_request:
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 取出程式碼
+        uses: actions/checkout@v4
+
+      - name: 安裝 Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: 安裝 Android SDK
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y unzip wget
+          mkdir -p "$HOME/android-sdk/cmdline-tools"
+          wget -q -O /tmp/cmdtools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          rm -rf /tmp/cmdtools
+          unzip -q /tmp/cmdtools.zip -d /tmp/cmdtools
+          rm -rf "$HOME/android-sdk/cmdline-tools/latest"
+          mv /tmp/cmdtools/cmdline-tools "$HOME/android-sdk/cmdline-tools/latest"
+          export ANDROID_HOME="$HOME/android-sdk"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" --licenses >/tmp/sdk-licenses.log || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" "platforms;android-34" "build-tools;34.0.0"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+
+      - name: 建置除錯版 APK
+        working-directory: android
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:assembleDebug --stacktrace --no-daemon
+
+      - name: 上傳 APK 成品
+        uses: actions/upload-artifact@v4
+        with:
+          name: boox-dashboard-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: 發佈到 GitHub Release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          apk="android/app/build/outputs/apk/debug/app-debug.apk"
+          notes="BOOX Go 10.3 除錯版安裝檔。下載 app-debug.apk 後傳到裝置安裝。每天約 06:05 與 18:05（裝置本地時間）會重新載入看板。"
+          if gh release view boox-apk >/dev/null 2>&1; then
+            gh release upload boox-apk "$apk" --clobber
+          else
+            gh release create boox-apk "$apk" \
+              --title "BOOX 看板 APK" \
+              --notes "$notes" \
+              --prerelease \
+              --latest=false
+          fi
