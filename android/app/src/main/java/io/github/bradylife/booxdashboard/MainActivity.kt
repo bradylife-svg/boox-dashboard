@@ -7,6 +7,7 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -30,6 +31,8 @@ import android.widget.ScrollView
 import android.widget.TextView
 import java.net.HttpURLConnection
 import java.net.URL
+import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * 全螢幕電子紙看板。點一下重新載入，長按在網頁與 PNG 之間切換。
@@ -40,6 +43,8 @@ class MainActivity : Activity() {
     private var imageView: ImageView? = null
     private var statusView: TextView? = null
     private var pinnedError = false
+    private var appliedScale = -1
+    private var hasLoadedPage = false
     private val hideStatus = Runnable {
         if (!pinnedError) {
             statusView?.visibility = View.GONE
@@ -53,6 +58,8 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.setBackgroundDrawable(ColorDrawable(Color.WHITE))
+        window.decorView.setBackgroundColor(Color.WHITE)
         try {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
@@ -126,21 +133,25 @@ class MainActivity : Activity() {
                     FrameLayout.LayoutParams.MATCH_PARENT,
                 ),
             )
+        }
+        val image = ImageView(this).apply {
+            id = R.id.dashboard_image
+            setBackgroundColor(Color.WHITE)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            contentDescription = getString(R.string.app_name)
+            visibility = if (created == null || pngMode) View.VISIBLE else View.GONE
+        }
+        imageView = image
+        root.addView(
+            image,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        if (created != null) {
+            created.visibility = if (pngMode) View.GONE else View.VISIBLE
         } else {
-            val image = ImageView(this).apply {
-                id = R.id.dashboard_image
-                setBackgroundColor(Color.WHITE)
-                scaleType = ImageView.ScaleType.FIT_CENTER
-                contentDescription = getString(R.string.app_name)
-            }
-            imageView = image
-            root.addView(
-                image,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                ),
-            )
             pngMode = true
         }
         val status = TextView(this).apply {
@@ -255,7 +266,7 @@ class MainActivity : Activity() {
                 isHapticFeedbackEnabled = false
                 setLayerType(View.LAYER_TYPE_SOFTWARE, null)
                 settings.apply {
-                    javaScriptEnabled = false
+                    javaScriptEnabled = true
                     domStorageEnabled = false
                     cacheMode = WebSettings.LOAD_NO_CACHE
                     useWideViewPort = true
@@ -268,8 +279,22 @@ class MainActivity : Activity() {
                     loadsImagesAutomatically = true
                     mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                 }
-                setInitialScale(0)
+                setBackgroundColor(Color.WHITE)
+                addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
+                    updateInitialScale(v as WebView)
+                }
                 webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView, url: String?) {
+                        hasLoadedPage = true
+                        applyCssFit(view)
+                        view.postDelayed({
+                            if (!isDestroyed) {
+                                applyCssFit(view)
+                                EinkRefresh.full(view)
+                            }
+                        }, 250)
+                    }
+
                     override fun onReceivedError(
                         view: WebView,
                         request: WebResourceRequest,
@@ -326,31 +351,23 @@ class MainActivity : Activity() {
                 statusView?.visibility = View.GONE
             }
             val page = webView
-            if (page == null) {
-                imageView?.let { loadPngInto(it) }
+            val image = imageView
+            if (pngMode || page == null) {
+                page?.visibility = View.GONE
+                image?.visibility = View.VISIBLE
+                if (image != null) {
+                    loadPngInto(image)
+                }
                 return
             }
+            image?.visibility = View.GONE
+            page.visibility = View.VISIBLE
+            updateInitialScale(page)
             val stamp = System.currentTimeMillis()
-            if (pngMode) {
-                val image = "$PNG_URL?ts=$stamp"
-                val html = """
-                    <!DOCTYPE html>
-                    <html lang="zh-Hant-TW"><head>
-                    <meta charset="utf-8">
-                    <meta name="viewport" content="width=1860, height=2480, initial-scale=1, user-scalable=no">
-                    <style>
-                      html,body{margin:0;padding:0;background:#fff;width:1860px;height:2480px;overflow:hidden;}
-                      img{width:1860px;height:2480px;display:block;}
-                    </style></head>
-                    <body><img src="$image" alt="晨間看板"></body></html>
-                """.trimIndent()
-                page.loadDataWithBaseURL(HTML_URL, html, "text/html", "utf-8", null)
-            } else {
-                page.loadUrl(
-                    "$HTML_URL?ts=$stamp",
-                    mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache"),
-                )
-            }
+            page.loadUrl(
+                "$HTML_URL?ts=$stamp",
+                mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache"),
+            )
         } catch (error: Throwable) {
             Log.e(TAG, "載入看板失敗", error)
             showStatus(getString(R.string.load_failed), sticky = true)
@@ -372,6 +389,8 @@ class MainActivity : Activity() {
                     }
                     if (bitmap != null) {
                         image.setImageBitmap(bitmap)
+                        image.scaleType = ImageView.ScaleType.FIT_CENTER
+                        EinkRefresh.full(image)
                     } else {
                         showStatus(getString(R.string.load_failed), sticky = true)
                     }
@@ -385,6 +404,69 @@ class MainActivity : Activity() {
                 }
             }
         }.start()
+    }
+
+    /**
+     * 100 表示 1 個 CSS px 對 1 個 dp。高密度時畫面實體寬度雖是 1860，
+     * CSS 視窗只有大約 1860/density，所以要縮小才能整頁塞進螢幕。
+     */
+    private fun scalePercent(width: Int, height: Int): Int {
+        if (width <= 0 || height <= 0) {
+            return 0
+        }
+        val density = resources.displayMetrics.density.coerceAtLeast(0.75f)
+        val cssWidth = width / density
+        val cssHeight = height / density
+        val ratio = min(cssWidth / PAGE_WIDTH, cssHeight / PAGE_HEIGHT)
+        return (ratio * 100f).roundToInt().coerceIn(1, 200)
+    }
+
+    private fun updateInitialScale(view: WebView) {
+        val next = scalePercent(view.width, view.height)
+        if (next <= 0 || next == appliedScale) {
+            return
+        }
+        val shouldReload = hasLoadedPage && !pngMode
+        appliedScale = next
+        view.setInitialScale(next)
+        Log.i(TAG, "初始縮放 $next% 視窗 ${view.width}x${view.height}")
+        if (shouldReload) {
+            view.post {
+                if (!isDestroyed && !pngMode) {
+                    view.reload()
+                }
+            }
+        }
+    }
+
+    private fun applyCssFit(view: WebView) {
+        val js = """
+            (function(){
+              try {
+                var PAGE_W = $PAGE_WIDTH, PAGE_H = $PAGE_HEIGHT;
+                var vv = window.visualViewport;
+                var vw = vv && vv.width ? vv.width : window.innerWidth;
+                var vh = vv && vv.height ? vv.height : window.innerHeight;
+                var body = document.body, root = document.documentElement;
+                if (!body || !root || !vw || !vh) return;
+                root.style.background = '#ffffff';
+                root.style.overflow = 'hidden';
+                body.style.background = '#ffffff';
+                var scale = Math.min(vw / PAGE_W, vh / PAGE_H);
+                if (Math.abs(scale - 1) < 0.02) {
+                  body.style.transform = 'none';
+                  return;
+                }
+                body.style.transformOrigin = '0 0';
+                body.style.transform = 'scale(' + scale + ')';
+                body.style.position = 'absolute';
+                body.style.margin = '0';
+                body.style.left = Math.max(0, (vw - PAGE_W * scale) / 2) + 'px';
+                body.style.top = Math.max(0, (vh - PAGE_H * scale) / 2) + 'px';
+              } catch (e) {}
+            })();
+        """.trimIndent()
+        view.evaluateJavascript(js, null)
     }
 
     private fun showStatus(text: String, sticky: Boolean) {
@@ -425,6 +507,8 @@ class MainActivity : Activity() {
 
     companion object {
         private const val TAG = "BooxDashboard"
+        const val PAGE_WIDTH = 1860
+        const val PAGE_HEIGHT = 2480
         const val EXTRA_REFRESH = "refresh"
         const val EXTRA_IGNORE_CRASH = "ignore_crash"
         const val HTML_URL = "https://bradylife-svg.github.io/boox-dashboard/"

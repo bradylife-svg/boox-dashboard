@@ -131,6 +131,8 @@ class RenderTests(unittest.TestCase):
         self.assertIn("本週行程", page)
         self.assertIn('name="viewport"', page)
         self.assertIn("width=1860", page)
+        self.assertIn('location.protocol === "file:"', page)
+        self.assertNotIn("minimum-scale=1", page)
         self.assertNotIn("private-", page)
         self.assertNotIn("http://", page)
         self.assertNotIn("https://", page)
