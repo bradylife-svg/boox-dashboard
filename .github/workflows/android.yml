@@ -43,12 +43,17 @@ jobs:
           export ANDROID_HOME="$HOME/android-sdk"
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" --licenses >/tmp/sdk-licenses.log || true
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" "platforms;android-34" "build-tools;34.0.0"
+          # 代管執行器預設的 ANDROID_SDK_ROOT 指向另一份 SDK。
+          # 兩個變數路徑不同時，Android Gradle Plugin 會直接失敗。
           echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
 
       - name: 建置除錯版 APK
         working-directory: android
         run: |
           chmod +x ./gradlew
+          test -n "$ANDROID_HOME"
+          test "$ANDROID_SDK_ROOT" = "$ANDROID_HOME"
           ./gradlew :app:assembleDebug --stacktrace --no-daemon
 
       - name: 上傳 APK 成品
