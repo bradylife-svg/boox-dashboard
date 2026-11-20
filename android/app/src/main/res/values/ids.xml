@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="crash_text" type="id" />
+    <item name="crash_retry" type="id" />
+    <item name="dashboard_web" type="id" />
+    <item name="dashboard_image" type="id" />
+</resources>

@@ -54,7 +54,7 @@ jobs:
           chmod +x ./gradlew
           test -n "$ANDROID_HOME"
           test "$ANDROID_SDK_ROOT" = "$ANDROID_HOME"
-          ./gradlew :app:assembleDebug --stacktrace --no-daemon
+          ./gradlew :app:testDebugUnitTest :app:assembleDebug --stacktrace --no-daemon
 
       - name: 上傳 APK 成品
         uses: actions/upload-artifact@v4
