@@ -10,51 +10,95 @@ import java.time.ZoneId
 import java.time.ZonedDateTime
 
 /**
- * 每天兩次鬧鐘：約 06:05 與 18:05（裝置本地時間）。
- * 有精確鬧鐘權限才用 setExactAndAllowWhileIdle；否則或被系統拒絕時改為不精確鬧鐘。
- * 重新開機後由 [BootReceiver] 把兩個時間都再排一次。
+ * 一條精確鬧鐘，依序響在本地時間
+ * 05:15–08:45 與 17:15–20:45，每 30 分鐘一次。
+ * 響了就排下一個時段。重新開機後由 [BootReceiver] 再接上。
  */
 object AlarmScheduler {
     private const val TAG = "BooxAlarm"
-    const val SLOT_MORNING = 605
-    const val SLOT_EVENING = 1805
+    private const val REQUEST_NEXT = 3015
+    private val LEGACY_REQUESTS = intArrayOf(605, 1805)
 
-    private data class Slot(val requestCode: Int, val hour: Int, val minute: Int)
-
-    private val slots = listOf(
-        Slot(SLOT_MORNING, 6, 5),
-        Slot(SLOT_EVENING, 18, 5),
+    /** 本地時間的重新載入時段，依序排列。 */
+    val RELOAD_SLOTS: List<Pair<Int, Int>> = listOf(
+        5 to 15,
+        5 to 45,
+        6 to 15,
+        6 to 45,
+        7 to 15,
+        7 to 45,
+        8 to 15,
+        8 to 45,
+        17 to 15,
+        17 to 45,
+        18 to 15,
+        18 to 45,
+        19 to 15,
+        19 to 45,
+        20 to 15,
+        20 to 45,
     )
 
     fun schedule(context: Context) {
         try {
             val appContext = context.applicationContext
             val alarmManager = appContext.getSystemService(AlarmManager::class.java) ?: return
-            for (slot in slots) {
-                scheduleSlot(appContext, alarmManager, slot)
-            }
+            cancelLegacy(appContext, alarmManager)
+            val triggerAt = nextReload(ZonedDateTime.now(ZoneId.systemDefault()))
+            scheduleAt(appContext, alarmManager, triggerAt.toInstant().toEpochMilli(), triggerAt)
         } catch (error: Exception) {
             Log.w(TAG, "排程失敗", error)
         }
     }
 
-    private fun scheduleSlot(context: Context, alarmManager: AlarmManager, slot: Slot) {
+    /** 下一個嚴格晚於現在約 30 秒的時段；今天沒有了就排到明天 05:15。 */
+    fun nextReload(now: ZonedDateTime): ZonedDateTime {
+        val earliest = now.plusSeconds(30)
+        for ((hour, minute) in RELOAD_SLOTS) {
+            val candidate = now.withHour(hour).withMinute(minute).withSecond(0).withNano(0)
+            if (candidate.isAfter(earliest)) {
+                return candidate
+            }
+        }
+        val (hour, minute) = RELOAD_SLOTS.first()
+        return now.plusDays(1).withHour(hour).withMinute(minute).withSecond(0).withNano(0)
+    }
+
+    private fun scheduleAt(
+        context: Context,
+        alarmManager: AlarmManager,
+        triggerAt: Long,
+        whenLocal: ZonedDateTime,
+    ) {
+        val pending = pendingIntent(context, REQUEST_NEXT)
+        val label = "%02d:%02d".format(whenLocal.hour, whenLocal.minute)
         try {
-            val pending = pendingIntent(context, slot.requestCode)
-            val triggerAt = nextTriggerMillis(slot.hour, slot.minute)
             if (canUseExact(alarmManager)) {
                 try {
                     alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
-                    Log.i(TAG, "已排程精確鬧鐘 ${slot.hour}:${slot.minute.toString().padStart(2, '0')}")
+                    Log.i(TAG, "已排程精確鬧鐘 $label")
                     return
                 } catch (error: SecurityException) {
                     Log.w(TAG, "沒有精確鬧鐘權限，改為一般鬧鐘", error)
                 }
             }
             alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
-            Log.i(TAG, "已排程一般鬧鐘 ${slot.hour}:${slot.minute.toString().padStart(2, '0')}")
+            Log.i(TAG, "已排程一般鬧鐘 $label")
         } catch (error: Exception) {
-            Log.w(TAG, "這個時段無法排程", error)
+            Log.w(TAG, "無法排程 $label", error)
+        }
+    }
+
+    private fun cancelLegacy(context: Context, alarmManager: AlarmManager) {
+        for (requestCode in LEGACY_REQUESTS) {
+            val pending = PendingIntent.getBroadcast(
+                context,
+                requestCode,
+                refreshIntent(context),
+                PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE,
+            ) ?: continue
+            alarmManager.cancel(pending)
+            pending.cancel()
         }
     }
 
@@ -70,25 +114,18 @@ object AlarmScheduler {
         }
     }
 
-    private fun pendingIntent(context: Context, requestCode: Int): PendingIntent {
-        val intent = Intent(context, RefreshReceiver::class.java).apply {
+    private fun refreshIntent(context: Context): Intent {
+        return Intent(context, RefreshReceiver::class.java).apply {
             action = RefreshReceiver.ACTION_REFRESH
-            putExtra(RefreshReceiver.EXTRA_SLOT, requestCode)
         }
+    }
+
+    private fun pendingIntent(context: Context, requestCode: Int): PendingIntent {
         return PendingIntent.getBroadcast(
             context,
             requestCode,
-            intent,
+            refreshIntent(context),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-    }
-
-    /** 下一個尚未過去的本地時間。已過則排到明天同一時刻。 */
-    fun nextTriggerMillis(hour: Int, minute: Int, now: ZonedDateTime = ZonedDateTime.now(ZoneId.systemDefault())): Long {
-        var next = now.withHour(hour).withMinute(minute).withSecond(0).withNano(0)
-        if (!next.isAfter(now)) {
-            next = next.plusDays(1)
-        }
-        return next.toInstant().toEpochMilli()
     }
 }

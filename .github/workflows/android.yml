@@ -70,7 +70,7 @@ jobs:
         run: |
           set -euo pipefail
           apk="android/app/build/outputs/apk/debug/app-debug.apk"
-          notes="BOOX Go 10.3 除錯版安裝檔。下載 app-debug.apk 後傳到裝置安裝。每天約 06:05 與 18:05（裝置本地時間）會重新載入看板。"
+          notes="BOOX Go 10.3 除錯版安裝檔。下載 app-debug.apk 後傳到裝置安裝。裝置本地時間 05:15–08:45 與 17:15–20:45 每 30 分鐘重新載入一次看板。"
           if gh release view boox-apk >/dev/null 2>&1; then
             gh release upload boox-apk "$apk" --clobber
           else
