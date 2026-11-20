@@ -1,14 +1,30 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.BooxDashboard" parent="@android:style/Theme.Material.Light.NoActionBar">
+    <!--
+      windowAnimationStyle 不可設成 @null。Android 12 啟動畫面會把資源 id 0
+      拿去載入，部分韌體（含 BOOX）會因此在 Activity 建立前崩潰。
+    -->
+    <style name="NoWindowAnimation" parent="@android:style/Animation">
+        <item name="android:activityOpenEnterAnimation">@null</item>
+        <item name="android:activityOpenExitAnimation">@null</item>
+        <item name="android:activityCloseEnterAnimation">@null</item>
+        <item name="android:activityCloseExitAnimation">@null</item>
+        <item name="android:taskOpenEnterAnimation">@null</item>
+        <item name="android:taskOpenExitAnimation">@null</item>
+        <item name="android:taskCloseEnterAnimation">@null</item>
+        <item name="android:taskCloseExitAnimation">@null</item>
+        <item name="android:taskToFrontEnterAnimation">@null</item>
+        <item name="android:taskToFrontExitAnimation">@null</item>
+        <item name="android:taskToBackEnterAnimation">@null</item>
+        <item name="android:taskToBackExitAnimation">@null</item>
+    </style>
+
+    <style name="Theme.BooxDashboard" parent="@android:style/Theme.Light.NoTitleBar.Fullscreen">
         <item name="android:windowBackground">@color/white</item>
         <item name="android:colorBackground">@color/white</item>
-        <item name="android:windowAnimationStyle">@null</item>
-        <item name="android:windowDisablePreview">true</item>
-        <item name="android:statusBarColor">@color/white</item>
-        <item name="android:navigationBarColor">@color/white</item>
-        <item name="android:windowLightStatusBar">true</item>
-        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:windowIsTranslucent">false</item>
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowAnimationStyle">@style/NoWindowAnimation</item>
         <item name="android:forceDarkAllowed">false</item>
     </style>
 </resources>

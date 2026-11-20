@@ -10,8 +10,9 @@ import java.time.ZoneId
 import java.time.ZonedDateTime
 
 /**
- * 每天兩次精確鬧鐘：約 06:05 與 18:05（裝置本地時間）。
- * 每次排程都會把兩個時間都再排一次，重新開機後由 [BootReceiver] 呼叫。
+ * 每天兩次鬧鐘：約 06:05 與 18:05（裝置本地時間）。
+ * 有精確鬧鐘權限才用 setExactAndAllowWhileIdle；否則或被系統拒絕時改為不精確鬧鐘。
+ * 重新開機後由 [BootReceiver] 把兩個時間都再排一次。
  */
 object AlarmScheduler {
     private const val TAG = "BooxAlarm"
@@ -26,28 +27,46 @@ object AlarmScheduler {
     )
 
     fun schedule(context: Context) {
-        val appContext = context.applicationContext
-        val alarmManager = appContext.getSystemService(AlarmManager::class.java)
-        for (slot in slots) {
-            scheduleSlot(appContext, alarmManager, slot)
+        try {
+            val appContext = context.applicationContext
+            val alarmManager = appContext.getSystemService(AlarmManager::class.java) ?: return
+            for (slot in slots) {
+                scheduleSlot(appContext, alarmManager, slot)
+            }
+        } catch (error: Exception) {
+            Log.w(TAG, "排程失敗", error)
         }
     }
 
     private fun scheduleSlot(context: Context, alarmManager: AlarmManager, slot: Slot) {
-        val pending = pendingIntent(context, slot.requestCode)
-        val triggerAt = nextTriggerMillis(slot.hour, slot.minute)
         try {
-            val canExact = Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
-                alarmManager.canScheduleExactAlarms()
-            if (canExact) {
-                alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
-            } else {
-                alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
+            val pending = pendingIntent(context, slot.requestCode)
+            val triggerAt = nextTriggerMillis(slot.hour, slot.minute)
+            if (canUseExact(alarmManager)) {
+                try {
+                    alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
+                    Log.i(TAG, "已排程精確鬧鐘 ${slot.hour}:${slot.minute.toString().padStart(2, '0')}")
+                    return
+                } catch (error: SecurityException) {
+                    Log.w(TAG, "沒有精確鬧鐘權限，改為一般鬧鐘", error)
+                }
             }
-            Log.i(TAG, "已排程 ${slot.hour}:${slot.minute.toString().padStart(2, '0')} exact=$canExact")
-        } catch (error: SecurityException) {
-            Log.w(TAG, "無法使用精確鬧鐘，改為一般鬧鐘", error)
             alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
+            Log.i(TAG, "已排程一般鬧鐘 ${slot.hour}:${slot.minute.toString().padStart(2, '0')}")
+        } catch (error: Exception) {
+            Log.w(TAG, "這個時段無法排程", error)
+        }
+    }
+
+    private fun canUseExact(alarmManager: AlarmManager): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            return true
+        }
+        return try {
+            alarmManager.canScheduleExactAlarms()
+        } catch (error: Exception) {
+            Log.w(TAG, "無法查詢精確鬧鐘權限", error)
+            false
         }
     }
 
