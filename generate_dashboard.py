@@ -1184,7 +1184,7 @@ def render_html(weather: Weather, calendar: CalendarData, markets: MarketData, g
 <html lang="zh-Hant-TW">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width={PAGE_WIDTH}, height={PAGE_HEIGHT}, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="viewport" content="width={PAGE_WIDTH}, height={PAGE_HEIGHT}, viewport-fit=cover">
   <meta name="color-scheme" content="light">
   <meta name="theme-color" content="#ffffff">
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
@@ -1516,6 +1516,42 @@ def render_html(weather: Weather, calendar: CalendarData, markets: MarketData, g
     行程來自私人 Google 日曆 iCal（今日起七日，已換算台北時間）。
     此頁為電子紙直向 1860×2480，僅使用黑白。
   </footer>
+  <script>
+    (function () {{
+      if (location.protocol === "file:") return;
+      var PAGE_W = {PAGE_WIDTH};
+      var PAGE_H = {PAGE_HEIGHT};
+      function fit() {{
+        var vv = window.visualViewport;
+        var vw = vv && vv.width ? vv.width : window.innerWidth;
+        var vh = vv && vv.height ? vv.height : window.innerHeight;
+        var body = document.body;
+        var root = document.documentElement;
+        if (!body || !root || !vw || !vh) return;
+        root.style.background = "#fff";
+        root.style.overflow = "hidden";
+        body.style.background = "#fff";
+        var scale = Math.min(vw / PAGE_W, vh / PAGE_H);
+        if (Math.abs(scale - 1) < 0.02) {{
+          body.style.transform = "none";
+          body.style.position = "";
+          body.style.left = "";
+          body.style.top = "";
+          return;
+        }}
+        body.style.transformOrigin = "0 0";
+        body.style.transform = "scale(" + scale + ")";
+        body.style.position = "absolute";
+        body.style.margin = "0";
+        body.style.left = Math.max(0, (vw - PAGE_W * scale) / 2) + "px";
+        body.style.top = Math.max(0, (vh - PAGE_H * scale) / 2) + "px";
+      }}
+      window.addEventListener("resize", fit);
+      window.addEventListener("load", fit);
+      if (window.visualViewport) window.visualViewport.addEventListener("resize", fit);
+      fit();
+    }})();
+  </script>
 </body>
 </html>
 """
