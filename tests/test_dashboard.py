@@ -119,6 +119,105 @@ class IcsTests(unittest.TestCase):
         self.assertEqual(self.events[0].calendar, "測試日曆")
 
 
+SAMPLE_METEO = {
+    "current": {
+        "time": "2026-11-23T09:00",
+        "temperature_2m": 18.2,
+        "weather_code": 3,
+        "relative_humidity_2m": 60,
+    },
+    "daily": {
+        "time": ["2026-11-23", "2026-11-24"],
+        "weather_code": [3, 1],
+        "temperature_2m_max": [22.0, 24.0],
+        "temperature_2m_min": [16.0, 15.0],
+        "precipitation_probability_max": [10, 0],
+        "precipitation_sum": [0.0, 0.0],
+    },
+    "hourly": {
+        "time": ["2026-11-23T06:00", "2026-11-23T12:00"],
+        "temperature_2m": [16.5, 20.0],
+        "precipitation_probability": [10, 5],
+    },
+}
+
+
+class FallbackTests(unittest.TestCase):
+    def test_alternate_host_after_primary_fails(self) -> None:
+        calls: list[str] = []
+
+        def fake(url: str, attempts: int = 4, timeout: float = 30, backoff: bool = True) -> dict:
+            calls.append(url)
+            self.assertEqual(attempts, 4)
+            self.assertEqual(timeout, 30)
+            self.assertTrue(backoff)
+            if "previous-runs" not in url:
+                raise RuntimeError("handshake timed out")
+            return SAMPLE_METEO
+
+        original = dash.http_get_json_retry
+        dash.http_get_json_retry = fake
+        try:
+            weather = dash.fetch_weather(datetime(2026, 11, 23).date())
+        finally:
+            dash.http_get_json_retry = original
+        self.assertTrue(weather.ok)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("api.open-meteo.com", calls[0])
+        self.assertIn("previous-runs-api.open-meteo.com", calls[1])
+        self.assertEqual(weather.current_temp, 18.2)
+
+    def test_fallback_render_hides_raw_error(self) -> None:
+        failed = dash.Weather(
+            source="Open-Meteo",
+            ok=False,
+            error="Network error for https://api.open-meteo.com/v1/forecast?latitude=1 _ssl.c:994: The handshake operation timed out",
+        )
+        snapshot = {
+            "weather": {
+                "fetched_at": "2026-11-23T09:34:00+08:00",
+                "raw": SAMPLE_METEO,
+            }
+        }
+        weather, _calendar, _markets = dash.apply_fallbacks(
+            failed,
+            dash.not_configured_calendar(),
+            dash.MarketData(),
+            datetime(2026, 11, 23).date(),
+            snapshot,
+        )
+        page = dash.render_html(
+            weather,
+            dash.not_configured_calendar(),
+            dash.MarketData(),
+            datetime(2026, 11, 23, 10, 0, tzinfo=TZ),
+        )
+        self.assertIn("天氣資料沿用 11/23 09:34", page)
+        self.assertIn("18.2°", page)
+        self.assertIn("22.0°", page)
+        self.assertNotIn("https://", page)
+        self.assertNotIn("ssl", page)
+        self.assertNotIn("Network error", page)
+        self.assertNotIn("handshake", page)
+
+    def test_no_fallback_is_short_chinese(self) -> None:
+        failed = dash.Weather(
+            source="Open-Meteo",
+            ok=False,
+            error="Network error for https://api.open-meteo.com/v1/forecast _ssl.c:994",
+        )
+        page = dash.render_html(
+            failed,
+            dash.not_configured_calendar(),
+            dash.MarketData(),
+            datetime(2026, 11, 23, 10, 0, tzinfo=TZ),
+        )
+        self.assertIn("天氣資料暫時無法取得", page)
+        self.assertNotIn("https://", page)
+        self.assertNotIn("ssl", page)
+        self.assertNotIn("Network error", page)
+
+
 class RenderTests(unittest.TestCase):
     def test_missing_secret_message(self) -> None:
         page = dash.render_html(

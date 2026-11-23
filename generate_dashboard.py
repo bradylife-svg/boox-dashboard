@@ -12,8 +12,10 @@ import argparse
 import html
 import json
 import re
+import socket
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -39,6 +41,12 @@ USER_AGENT = (
 ROOT = Path(__file__).resolve().parent
 DEFAULT_HTML = ROOT / "site" / "index.html"
 DEFAULT_PNG = ROOT / "site" / "dashboard.png"
+SNAPSHOT_NAME = "snapshot.json"
+PAGES_SNAPSHOT_URL = "https://bradylife-svg.github.io/boox-dashboard/snapshot.json"
+OPEN_METEO_HOSTS = (
+    "https://api.open-meteo.com/v1/forecast",
+    "https://previous-runs-api.open-meteo.com/v1/forecast",
+)
 
 WMO_ZH: dict[int, str] = {
     0: "晴",
@@ -102,6 +110,10 @@ def http_get_bytes(
         if redact:
             raise RuntimeError("網路錯誤") from None
         raise RuntimeError(f"Network error for {url}: {exc.reason}") from exc
+    except (TimeoutError, socket.timeout) as exc:
+        if redact:
+            raise RuntimeError("連線逾時") from None
+        raise RuntimeError(f"Timeout for {url}: {exc}") from exc
 
 
 def http_get_json(
@@ -116,7 +128,13 @@ def http_get_json(
         raise RuntimeError(f"Non-JSON response from {url}") from exc
 
 
-def http_get_json_retry(url: str, attempts: int = 2, **kwargs: Any) -> Any:
+def http_get_json_retry(
+    url: str,
+    attempts: int = 2,
+    *,
+    backoff: bool = False,
+    **kwargs: Any,
+) -> Any:
     last: Exception | None = None
     for i in range(attempts):
         try:
@@ -125,6 +143,8 @@ def http_get_json_retry(url: str, attempts: int = 2, **kwargs: Any) -> Any:
             last = exc
             if i + 1 >= attempts:
                 break
+            if backoff:
+                time.sleep(min(8, 2**i))
     assert last is not None
     raise last
 
@@ -178,6 +198,9 @@ class Weather:
     current_condition: str | None = None
     days: list[DayForecast] = field(default_factory=list)
     hours: list[HourlyPoint] = field(default_factory=list)
+    fetched_at: datetime | None = None
+    carried: bool = False
+    raw: dict[str, Any] | None = None
 
 
 @dataclass
@@ -202,6 +225,8 @@ class CalendarData:
     events: list[CalendarEvent] = field(default_factory=list)
     not_configured: bool = False
     warnings: list[str] = field(default_factory=list)
+    fetched_at: datetime | None = None
+    carried: bool = False
 
 
 @dataclass
@@ -215,6 +240,7 @@ class Quote:
     currency: str = ""
     source: str = ""
     error: str | None = None
+    carried: bool = False
 
     @property
     def ok(self) -> bool:
@@ -225,6 +251,9 @@ class Quote:
 class MarketData:
     indices: list[Quote] = field(default_factory=list)
     watchlist: list[Quote] = field(default_factory=list)
+    fetched_at: datetime | None = None
+    carried: bool = False
+    partial_carry: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +266,7 @@ def wmo_label(code: int | None) -> str:
     return WMO_ZH.get(int(code), f"天氣代碼 {code}")
 
 
-def fetch_weather(today: date | None = None) -> Weather:
+def open_meteo_query() -> str:
     params = {
         "latitude": str(HSINCHU_LAT),
         "longitude": str(HSINCHU_LON),
@@ -247,12 +276,10 @@ def fetch_weather(today: date | None = None) -> Weather:
         "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum",
         "hourly": "temperature_2m,precipitation_probability",
     }
-    url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode(params)
-    try:
-        data = http_get_json_retry(url)
-    except Exception as exc:  # noqa: BLE001
-        return Weather(source="Open-Meteo", ok=False, error=str(exc))
+    return urllib.parse.urlencode(params)
 
+
+def parse_open_meteo(data: dict[str, Any], today: date | None = None) -> Weather:
     try:
         current = data.get("current") or {}
         daily = data.get("daily") or {}
@@ -269,6 +296,8 @@ def fetch_weather(today: date | None = None) -> Weather:
                     precip_mm=_maybe_float(_at(daily.get("precipitation_sum"), i)),
                 )
             )
+        if not days:
+            return Weather(source="Open-Meteo", ok=False, error="天氣資料暫時無法取得")
         hours: list[HourlyPoint] = []
         hourly = data.get("hourly") or {}
         if today is None:
@@ -302,9 +331,37 @@ def fetch_weather(today: date | None = None) -> Weather:
             current_condition=wmo_label(_maybe_int(current.get("weather_code"))),
             days=days,
             hours=hours,
+            raw=data,
         )
     except Exception as exc:  # noqa: BLE001
-        return Weather(source="Open-Meteo", ok=False, error=f"無法解析天氣資料：{exc}")
+        print(f"天氣資料無法解析：{exc}", flush=True)
+        return Weather(source="Open-Meteo", ok=False, error="天氣資料暫時無法取得")
+
+
+def fetch_weather(today: date | None = None, *, attempts: int = 4) -> Weather:
+    """抓 Open-Meteo。每個主機最多試四次，失敗再換備援主機。細節只寫日誌。"""
+    query = open_meteo_query()
+    if today is None:
+        today = datetime.now(TZ).date()
+    for base in OPEN_METEO_HOSTS:
+        url = base + "?" + query
+        host = urllib.parse.urlparse(base).netloc
+        try:
+            data = http_get_json_retry(url, attempts=attempts, timeout=30, backoff=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"天氣下載失敗（{host}，已試 {attempts} 次）：{exc}", flush=True)
+            continue
+        if not isinstance(data, dict):
+            print(f"天氣回應不是物件（{host}）", flush=True)
+            continue
+        weather = parse_open_meteo(data, today)
+        if weather.ok:
+            weather.fetched_at = datetime.now(TZ)
+            if "previous-runs" in host:
+                weather.source = "Open-Meteo previous-runs"
+            return weather
+        print(f"天氣內容不完整（{host}）", flush=True)
+    return Weather(source="Open-Meteo", ok=False, error="天氣資料暫時無法取得")
 
 
 # ---------------------------------------------------------------------------
@@ -486,6 +543,7 @@ def fetch_events_from_icals(urls: list[str], now: datetime) -> CalendarData:
         calendars_checked=calendars,
         events=events,
         warnings=warnings,
+        fetched_at=now.astimezone(TZ),
     )
 
 
@@ -787,7 +845,256 @@ def fetch_markets() -> MarketData:
             ("00400A", "主動國泰動能高息"),
         ]
     )
-    return MarketData(indices=[taiex, *us], watchlist=watch)
+    return MarketData(indices=[taiex, *us], watchlist=watch, fetched_at=datetime.now(TZ))
+
+
+# ---------------------------------------------------------------------------
+# Snapshot / fallback
+# ---------------------------------------------------------------------------
+
+def _iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=TZ)
+    return value.astimezone(TZ).isoformat(timespec="seconds")
+
+
+def _parse_stamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return parse_now(value)
+    except ValueError:
+        return None
+
+
+def carried_label(when: datetime | None) -> str:
+    if when is None:
+        return "上一版"
+    local = when.astimezone(TZ)
+    return f"{local.month}/{local.day} {local.strftime('%H:%M')}"
+
+
+def quote_to_dict(quote: Quote) -> dict[str, Any]:
+    return {
+        "symbol": quote.symbol,
+        "name": quote.name,
+        "close": quote.close,
+        "change": quote.change,
+        "change_pct": quote.change_pct,
+        "as_of": quote.as_of.isoformat() if quote.as_of else None,
+        "currency": quote.currency,
+        "source": quote.source,
+    }
+
+
+def quote_from_dict(raw: dict[str, Any]) -> Quote:
+    as_of = raw.get("as_of")
+    try:
+        parsed_day = date.fromisoformat(as_of) if isinstance(as_of, str) and as_of else None
+    except ValueError:
+        parsed_day = None
+    return Quote(
+        symbol=str(raw.get("symbol") or ""),
+        name=str(raw.get("name") or ""),
+        close=_maybe_float(raw.get("close")),
+        change=_maybe_float(raw.get("change")),
+        change_pct=_maybe_float(raw.get("change_pct")),
+        as_of=parsed_day,
+        currency=str(raw.get("currency") or ""),
+        source=str(raw.get("source") or ""),
+    )
+
+
+def calendar_to_dict(calendar: CalendarData) -> dict[str, Any]:
+    return {
+        "fetched_at": _iso(calendar.fetched_at),
+        "source": calendar.source,
+        "date": calendar.date,
+        "range_start": calendar.range_start,
+        "range_end": calendar.range_end,
+        "calendars_checked": calendar.calendars_checked,
+        "warnings": calendar.warnings,
+        "events": [
+            {
+                "summary": event.summary,
+                "start": event.start,
+                "end": event.end,
+                "all_day": event.all_day,
+                "location": event.location,
+                "calendar": event.calendar,
+            }
+            for event in calendar.events
+        ],
+    }
+
+
+def calendar_from_dict(raw: dict[str, Any]) -> CalendarData | None:
+    events: list[CalendarEvent] = []
+    for item in raw.get("events") or []:
+        if not isinstance(item, dict):
+            continue
+        events.append(
+            CalendarEvent(
+                summary=_one_line(str(item.get("summary") or "（無標題）")),
+                start=item.get("start"),
+                end=item.get("end"),
+                all_day=bool(item.get("all_day")),
+                location=_one_line(str(item.get("location") or "")),
+                calendar=_one_line(str(item.get("calendar") or "")),
+            )
+        )
+    if not events and not raw.get("calendars_checked"):
+        return None
+    events.sort(key=_event_sort_key)
+    return CalendarData(
+        source=str(raw.get("source") or "上一版"),
+        ok=True,
+        date=raw.get("date"),
+        range_start=raw.get("range_start"),
+        range_end=raw.get("range_end"),
+        calendars_checked=list(raw.get("calendars_checked") or []),
+        events=events,
+        warnings=list(raw.get("warnings") or []),
+        fetched_at=_parse_stamp(raw.get("fetched_at")),
+        carried=True,
+    )
+
+
+def markets_to_dict(markets: MarketData) -> dict[str, Any]:
+    return {
+        "fetched_at": _iso(markets.fetched_at),
+        "indices": [quote_to_dict(quote) for quote in markets.indices if quote.ok],
+        "watchlist": [quote_to_dict(quote) for quote in markets.watchlist if quote.ok],
+    }
+
+
+def _quotes_from_list(raw: Any) -> list[Quote]:
+    if not isinstance(raw, list):
+        return []
+    quotes: list[Quote] = []
+    for item in raw:
+        if isinstance(item, dict):
+            quote = quote_from_dict(item)
+            if quote.close is not None:
+                quotes.append(quote)
+    return quotes
+
+
+def markets_from_dict(raw: dict[str, Any]) -> MarketData | None:
+    indices = _quotes_from_list(raw.get("indices"))
+    watchlist = _quotes_from_list(raw.get("watchlist"))
+    if not indices and not watchlist:
+        return None
+    return MarketData(
+        indices=indices,
+        watchlist=watchlist,
+        fetched_at=_parse_stamp(raw.get("fetched_at")),
+        carried=True,
+    )
+
+
+def build_snapshot(
+    weather: Weather,
+    calendar: CalendarData,
+    markets: MarketData,
+    generated_at: datetime,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"generated_at": _iso(generated_at)}
+    if weather.ok and isinstance(weather.raw, dict):
+        payload["weather"] = {
+            "fetched_at": _iso(weather.fetched_at or generated_at),
+            "raw": weather.raw,
+        }
+    if calendar.ok and not calendar.not_configured:
+        payload["calendar"] = calendar_to_dict(calendar)
+    if any(quote.ok for quote in [*markets.indices, *markets.watchlist]):
+        payload["markets"] = markets_to_dict(markets)
+    return payload
+
+
+def load_snapshot_dict(url: str = PAGES_SNAPSHOT_URL) -> dict[str, Any] | None:
+    try:
+        data = http_get_json(url, timeout=20)
+    except Exception as exc:  # noqa: BLE001
+        print(f"無法讀取上一版看板資料：{exc}", flush=True)
+        return None
+    if not isinstance(data, dict):
+        print("上一版看板資料格式不符", flush=True)
+        return None
+    return data
+
+
+def _merge_quotes(current: list[Quote], previous: list[Quote]) -> tuple[list[Quote], bool, bool]:
+    prior = {quote.symbol: quote for quote in previous if quote.ok}
+    merged: list[Quote] = []
+    carried = False
+    kept_fresh = False
+    for quote in current:
+        if quote.ok:
+            merged.append(quote)
+            kept_fresh = True
+            continue
+        old = prior.get(quote.symbol)
+        if old is not None:
+            old.carried = True
+            merged.append(old)
+            carried = True
+            print(f"股市沿用上一版：{quote.name}", flush=True)
+            continue
+        quote.error = "資料暫缺"
+        merged.append(quote)
+    return merged, carried, kept_fresh
+
+
+def apply_fallbacks(
+    weather: Weather,
+    calendar: CalendarData,
+    markets: MarketData,
+    today: date,
+    snapshot: dict[str, Any] | None,
+) -> tuple[Weather, CalendarData, MarketData]:
+    if snapshot is None:
+        return weather, calendar, markets
+
+    weather_entry = snapshot.get("weather")
+    if not weather.ok and isinstance(weather_entry, dict):
+        raw = weather_entry.get("raw")
+        if isinstance(raw, dict):
+            restored = parse_open_meteo(raw, today)
+            if restored.ok:
+                restored.fetched_at = _parse_stamp(weather_entry.get("fetched_at"))
+                restored.carried = True
+                restored.raw = raw
+                print(f"天氣沿用 {carried_label(restored.fetched_at)}", flush=True)
+                weather = restored
+            else:
+                print("上一版天氣無法套用到今天", flush=True)
+
+    calendar_entry = snapshot.get("calendar")
+    if not calendar.ok and not calendar.not_configured and isinstance(calendar_entry, dict):
+        restored_calendar = calendar_from_dict(calendar_entry)
+        if restored_calendar is not None:
+            print(f"行程沿用 {carried_label(restored_calendar.fetched_at)}", flush=True)
+            calendar = restored_calendar
+
+    markets_entry = snapshot.get("markets")
+    if isinstance(markets_entry, dict):
+        previous = markets_from_dict(markets_entry)
+        if previous is not None and any(not quote.ok for quote in [*markets.indices, *markets.watchlist]):
+            indices, carried_i, fresh_i = _merge_quotes(markets.indices, previous.indices)
+            watch, carried_w, fresh_w = _merge_quotes(markets.watchlist, previous.watchlist)
+            carried = carried_i or carried_w
+            if carried:
+                markets = MarketData(
+                    indices=indices,
+                    watchlist=watch,
+                    fetched_at=previous.fetched_at,
+                    carried=True,
+                    partial_carry=carried and (fresh_i or fresh_w),
+                )
+    return weather, calendar, markets
 
 
 # ---------------------------------------------------------------------------
@@ -1090,10 +1397,10 @@ def render_html(weather: Weather, calendar: CalendarData, markets: MarketData, g
           <div class="forecast">{"".join(forecast_cells)}</div>
         </div>
         {render_hourly_block(weather.hours, generated_at)}
+        {f'<p class="week-note">天氣資料沿用 {html.escape(carried_label(weather.fetched_at))}</p>' if weather.carried else ""}
         """
     else:
-        err = weather.error or "天氣資料暫時無法取得"
-        weather_body = f'<p class="empty">天氣資料暫時無法取得<span class="sub">{html.escape(err)}</span></p>'
+        weather_body = '<p class="empty">天氣資料暫時無法取得</p>'
 
     if calendar.not_configured:
         calendar_body = (
@@ -1101,8 +1408,7 @@ def render_html(weather: Weather, calendar: CalendarData, markets: MarketData, g
             '<span class="sub">請在 GitHub Actions 密鑰設定 GCAL_ICS_URLS</span></p>'
         )
     elif not calendar.ok:
-        err = calendar.error or "行程資料暫時無法取得"
-        calendar_body = f'<p class="empty">行程資料暫時無法取得<span class="sub">{html.escape(err)}</span></p>'
+        calendar_body = '<p class="empty">行程資料暫時無法取得</p>'
     else:
         week = group_week_events(calendar.events, today, 7)
         day_rows = []
@@ -1141,6 +1447,8 @@ def render_html(weather: Weather, calendar: CalendarData, markets: MarketData, g
         )
         if calendar.warnings:
             note = (note + " " + " ".join(calendar.warnings)).strip()
+        if calendar.carried:
+            note = (note + f" 行程資料沿用 {carried_label(calendar.fetched_at)}。").strip()
         calendar_body = f'<div class="week">{"".join(day_rows)}</div><p class="week-note">{html.escape(note)}</p>'
 
     def quote_tile(quote: Quote, show_symbol: bool) -> str:
@@ -1148,13 +1456,11 @@ def render_html(weather: Weather, calendar: CalendarData, markets: MarketData, g
         if show_symbol and quote.symbol not in {".DJI", ".SPX", ".IXIC", "TAIEX"}:
             symbol_html = f'<div class="tile-symbol">{html.escape(quote.symbol)}</div>'
         if not quote.ok:
-            reason = quote.error or "無法取得"
             return (
                 f'<div class="stock-tile miss">'
                 f"{symbol_html}"
                 f'<div class="tile-name">{html.escape(quote.name)}</div>'
                 f'<div class="tile-miss">資料暫缺</div>'
-                f'<div class="tile-miss-reason">{html.escape(reason)}</div>'
                 f"</div>"
             )
         klass = movement_class(quote.change if quote.change is not None else quote.change_pct)
@@ -1179,6 +1485,9 @@ def render_html(weather: Weather, calendar: CalendarData, markets: MarketData, g
     if us_dates:
         asof_bits.append("美股收盤 " + "、".join(day.strftime("%Y-%m-%d") for day in us_dates))
     asof_line = "；".join(asof_bits) if asof_bits else "尚未取得股市收盤日期"
+    if markets.carried:
+        prefix = "部分股市資料沿用" if markets.partial_carry else "股市資料沿用"
+        asof_line = f"{prefix} {carried_label(markets.fetched_at)}。{asof_line}"
 
     return f"""<!DOCTYPE html>
 <html lang="zh-Hant-TW">
@@ -1688,11 +1997,30 @@ def main(argv: list[str] | None = None) -> int:
     weather = fetch_weather(generated_at.date())
     calendar = load_calendar(generated_at, args.events, ics_urls)
     markets = fetch_markets()
+    needs_fallback = (
+        not weather.ok
+        or (not calendar.ok and not calendar.not_configured)
+        or any(not quote.ok for quote in [*markets.indices, *markets.watchlist])
+    )
+    if needs_fallback:
+        weather, calendar, markets = apply_fallbacks(
+            weather,
+            calendar,
+            markets,
+            generated_at.date(),
+            load_snapshot_dict(),
+        )
 
     html_text = render_html(weather, calendar, markets, generated_at)
     args.html.parent.mkdir(parents=True, exist_ok=True)
     args.html.write_text(html_text, encoding="utf-8")
+    snapshot_path = args.html.parent / SNAPSHOT_NAME
+    snapshot_path.write_text(
+        json.dumps(build_snapshot(weather, calendar, markets, generated_at), ensure_ascii=False),
+        encoding="utf-8",
+    )
     print(f"已寫入 {args.html}")
+    print(f"已寫入 {snapshot_path}")
 
     if not args.skip_png:
         render_png(args.html, args.png)
